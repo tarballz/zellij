@@ -11,6 +11,7 @@ pub mod output;
 pub mod panes;
 pub mod tab;
 
+pub mod ai_summary;
 pub mod attention;
 pub mod background_jobs;
 mod desktop_app;
@@ -5748,6 +5749,13 @@ fn init_session(
             }
         })
         .unwrap();
+    // optional AI-written session blurbs; does nothing unless `ai_summary` is configured
+    // (changes to that config are picked up the next time the session starts)
+    let _ai_summary_thread = ai_summary::service::spawn_ai_summary_service(
+        config.ai_summary.clone(),
+        session_id.clone(),
+        to_screen.clone(),
+    );
     let mut keybinds_dir_watcher = None;
     if let Some(config_file_path) = cli_assets.config_file_path.clone() {
         let layout_dir = config_options

@@ -7,6 +7,7 @@ use crate::{
     envs,
     input::layout::Layout,
     ipc::{ClientToServerMsg, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg},
+    session_blurb,
     session_index::{self, SessionIndex},
 };
 use anyhow;
@@ -321,6 +322,10 @@ pub fn print_sessions(
 ) {
     // (session_name, timestamp, is_dead)
     let curr_session = envs::get_session_name().unwrap_or_else(|_| "".into());
+    // unknown (and so unlimited) when output is piped
+    let terminal_width = crossterm::terminal::size()
+        .ok()
+        .map(|(columns, _)| columns as usize);
     sessions.sort_by(|a, b| {
         if reverse {
             // sort by `Duration` ascending (newest would be first)
@@ -347,21 +352,47 @@ pub fn print_sessions(
                 let timestamp = format!("[Created {} ago]", format_duration(*timestamp));
                 println!("{} {} {}", session_name, timestamp, suffix);
             } else {
-                let formatted_session_name = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
-                let suffix = if curr_session == *session_name {
-                    format!("(current)")
-                } else if *is_dead {
-                    format!("(\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)")
-                } else {
-                    String::new()
-                };
-                let timestamp = format!(
-                    "[Created \u{1b}[35;1m{}\u{1b}[m ago]",
-                    format_duration(*timestamp)
+                println!(
+                    "{}",
+                    formatted_session_line(
+                        session_name,
+                        *timestamp,
+                        *is_dead,
+                        curr_session == *session_name,
+                        session_blurb_for_name(session_name).as_deref(),
+                        terminal_width,
+                    )
                 );
-                println!("{} {} {}", formatted_session_name, timestamp, suffix);
             }
         })
+}
+
+/// The cached AI blurb of the session with this name, if it has one.
+fn session_blurb_for_name(session_name: &str) -> Option<String> {
+    let session_id = resolve_session_id(session_name).unwrap_or_else(|| session_name.to_owned());
+    session_blurb::read_blurb(&session_info_folder_for_session(&session_id))
+}
+
+/// The colored line `print_sessions` prints for one session, with its AI blurb if it has one.
+fn formatted_session_line(
+    session_name: &str,
+    age: Duration,
+    is_dead: bool,
+    is_current: bool,
+    blurb: Option<&str>,
+    terminal_width: Option<usize>,
+) -> String {
+    let formatted_session_name = format!("\u{1b}[32;1m{}\u{1b}[m", session_name);
+    let suffix = if is_current {
+        format!("(current)")
+    } else if is_dead {
+        format!("(\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)")
+    } else {
+        String::new()
+    };
+    let age = format!("[Created \u{1b}[35;1m{}\u{1b}[m ago]", format_duration(age));
+    let line = format!("{} {} {}", formatted_session_name, age, suffix);
+    session_blurb::append_blurb(&line, blurb, terminal_width)
 }
 
 pub fn print_sessions_with_index(sessions: Vec<String>) {
@@ -1001,5 +1032,82 @@ mod session_folder_name_tests {
     #[test]
     fn validate_session_name_rejects_backslash_on_windows() {
         assert!(validate_session_name("a\\b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod session_line_tests {
+    use super::*;
+
+    const FIVE_MINUTES: Duration = Duration::from_secs(300);
+    const RUNNING_LINE: &str = "\u{1b}[32;1mdemo\u{1b}[m [Created \u{1b}[35;1m5m\u{1b}[m ago] ";
+
+    #[test]
+    fn a_running_session_without_a_blurb_is_printed_as_before() {
+        assert_eq!(
+            formatted_session_line("demo", FIVE_MINUTES, false, false, None, Some(80)),
+            RUNNING_LINE
+        );
+    }
+
+    #[test]
+    fn the_current_and_exited_suffixes_are_printed_as_before() {
+        assert_eq!(
+            formatted_session_line("demo", FIVE_MINUTES, false, true, None, None),
+            format!("{}(current)", RUNNING_LINE)
+        );
+        assert_eq!(
+            formatted_session_line("demo", FIVE_MINUTES, true, false, None, None),
+            format!(
+                "{}(\u{1b}[31;1mEXITED\u{1b}[m - attach to resurrect)",
+                RUNNING_LINE
+            )
+        );
+    }
+
+    #[test]
+    fn a_blurb_follows_the_rest_of_the_line() {
+        let line = formatted_session_line(
+            "demo",
+            FIVE_MINUTES,
+            false,
+            false,
+            Some("Fixing the build"),
+            None,
+        );
+        assert_eq!(
+            line,
+            format!(
+                "{} - \u{1b}[2mFixing the build\u{1b}[m",
+                RUNNING_LINE.trim_end()
+            )
+        );
+    }
+
+    #[test]
+    fn a_blurb_follows_the_exited_suffix() {
+        let line = formatted_session_line(
+            "demo",
+            FIVE_MINUTES,
+            true,
+            false,
+            Some("Fixing the build"),
+            None,
+        );
+        assert!(line.contains("attach to resurrect) - "), "got {:?}", line);
+        assert!(line.contains("Fixing the build"));
+    }
+
+    #[test]
+    fn a_narrow_terminal_drops_the_blurb_instead_of_wrapping() {
+        let line = formatted_session_line(
+            "demo",
+            FIVE_MINUTES,
+            false,
+            false,
+            Some("Fixing the build"),
+            Some(25),
+        );
+        assert_eq!(line, RUNNING_LINE);
     }
 }

@@ -46,6 +46,8 @@ pub mod pane_mirror;
 #[cfg(all(not(target_family = "wasm"), feature = "web_server_capability"))]
 pub mod remote_session_tokens;
 #[cfg(not(target_family = "wasm"))]
+pub mod session_blurb;
+#[cfg(not(target_family = "wasm"))]
 pub mod session_index;
 #[cfg(not(target_family = "wasm"))]
 pub mod session_link;
