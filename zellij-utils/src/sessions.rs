@@ -314,6 +314,17 @@ fn assert_socket(_name: &str) -> bool {
     true
 }
 
+/// The width to fit session lines into: `queried` (what the terminal reported) when stdout is
+/// a terminal, otherwise unlimited. Terminal size lookups find the controlling terminal even
+/// when stdout is redirected, so redirected output would otherwise be cut to the screen width.
+fn output_width(stdout_is_terminal: bool, queried: Option<usize>) -> Option<usize> {
+    if stdout_is_terminal {
+        queried
+    } else {
+        None
+    }
+}
+
 pub fn print_sessions(
     mut sessions: Vec<(String, Duration, bool)>,
     no_formatting: bool,
@@ -322,10 +333,12 @@ pub fn print_sessions(
 ) {
     // (session_name, timestamp, is_dead)
     let curr_session = envs::get_session_name().unwrap_or_else(|_| "".into());
-    // unknown (and so unlimited) when output is piped
-    let terminal_width = crossterm::terminal::size()
-        .ok()
-        .map(|(columns, _)| columns as usize);
+    let terminal_width = output_width(
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        crossterm::terminal::size()
+            .ok()
+            .map(|(columns, _)| columns as usize),
+    );
     sessions.sort_by(|a, b| {
         if reverse {
             // sort by `Duration` ascending (newest would be first)
@@ -1109,5 +1122,21 @@ mod session_line_tests {
             Some(25),
         );
         assert_eq!(line, RUNNING_LINE);
+    }
+
+    #[test]
+    fn a_terminal_gets_the_width_it_reported() {
+        assert_eq!(output_width(true, Some(80)), Some(80));
+    }
+
+    #[test]
+    fn redirected_output_is_never_cut_to_the_screen_width() {
+        assert_eq!(output_width(false, Some(80)), None);
+    }
+
+    #[test]
+    fn an_unknown_width_stays_unknown() {
+        assert_eq!(output_width(true, None), None);
+        assert_eq!(output_width(false, None), None);
     }
 }
