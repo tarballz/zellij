@@ -57,12 +57,13 @@ suggest = { workspace = true }
 names = { workspace = true }
 rusqlite = { version = "0.30", default-features = false, features = ["bundled"] }
 notify = { workspace = true }
+# Needed on every platform: `zellij ls` reads the terminal width to fit session lines
+crossterm = { workspace = true, features = ["events"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(windows)'.dependencies]
-crossterm = { workspace = true, features = ["events"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
