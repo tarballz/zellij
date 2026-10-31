@@ -7041,6 +7041,11 @@ impl Config {
             let attention = crate::input::attention::AttentionConfig::from_kdl(attention_config)?;
             config.attention = config.attention.merge(attention);
         }
+        if let Some(ai_summary_config) = kdl_config.get("ai_summary") {
+            let ai_summary =
+                crate::input::ai_summary::AiSummaryConfig::from_kdl(&ai_summary_config)?;
+            config.ai_summary = config.ai_summary.merge(ai_summary);
+        }
         Ok(config)
     }
     pub fn to_string(&self, add_comments: bool) -> String {
@@ -7088,6 +7093,10 @@ impl Config {
 
         if let Some(attention) = self.attention.to_kdl() {
             document.nodes_mut().push(attention);
+        }
+
+        if let Some(ai_summary) = self.ai_summary.to_kdl() {
+            document.nodes_mut().push(ai_summary);
         }
 
         let mut options = self.options.clone();
@@ -10183,6 +10192,23 @@ fn session_suggestions_to_string() {
     let reparsed = Config::from_kdl(&serialized.to_string(), None).unwrap();
     assert_eq!(config.session_suggestions, reparsed.session_suggestions);
     insta::assert_snapshot!(serialized.to_string());
+}
+
+#[test]
+fn ai_summary_to_string() {
+    let fake_config = r##"
+        ai_summary {
+            provider "claude"
+            api_key_env "ANTHROPIC_API_KEY"
+            interval_secs 120
+            include_screen_text true
+            screen_lines 15
+        }"##;
+    let config = Config::from_kdl(fake_config, None).unwrap();
+    assert!(config.ai_summary.is_enabled());
+    let serialized = config.ai_summary.to_kdl().unwrap();
+    let reparsed = Config::from_kdl(&serialized.to_string(), None).unwrap();
+    assert_eq!(config.ai_summary, reparsed.ai_summary);
 }
 
 #[test]

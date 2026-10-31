@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod ai_summary;
 pub mod attention;
 pub mod cli_assets;
 pub mod command;

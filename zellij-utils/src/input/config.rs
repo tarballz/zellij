@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use std::convert::TryFrom;
 
+use super::ai_summary::AiSummaryConfig;
 use super::attention::AttentionConfig;
 use super::context_menu::ContextMenuConfig;
 use super::keybind_presets::KeybindsLayers;
@@ -58,6 +59,8 @@ pub struct Config {
     pub session_suggestions: SessionSuggestionsConfig,
     #[serde(default)]
     pub attention: AttentionConfig,
+    #[serde(default)]
+    pub ai_summary: AiSummaryConfig,
 }
 
 mod shared_mousebinds {
@@ -395,6 +398,7 @@ impl Config {
         self.terminal = self.terminal.merge(other.terminal);
         self.session_suggestions = self.session_suggestions.merge(other.session_suggestions);
         self.attention = self.attention.merge(other.attention);
+        self.ai_summary = self.ai_summary.merge(other.ai_summary);
         Ok(())
     }
     pub fn config_file_path(opts: &CliArgs) -> Option<PathBuf> {

@@ -12099,4 +12099,12 @@ Config {
         },
         notification_details: None,
     },
+    ai_summary: AiSummaryConfig {
+        provider: None,
+        model: None,
+        api_key_env: None,
+        interval_secs: None,
+        include_screen_text: None,
+        screen_lines: None,
+    },
 }

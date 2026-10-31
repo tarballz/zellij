@@ -602,6 +602,7 @@ pub fn setting_values(config: &Config) -> BTreeMap<SettingKey, Option<String>> {
         terminal,
         session_suggestions: _session_suggestions_are_read_by_the_server,
         attention,
+        ai_summary: _ai_summary_is_read_by_the_server,
     } = config;
     let mut values = BTreeMap::new();
     option_values(options, &mut values);
