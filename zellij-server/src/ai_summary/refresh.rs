@@ -3,9 +3,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use zellij_utils::input::ai_summary::AiSummaryConfig;
+use zellij_utils::input::ai_summary::{AiProvider, AiSummaryConfig};
 
-use super::prompt::{build_prompt, PromptOptions, SessionSnapshot};
+use super::prompt::{build_details_prompt, build_prompt, PromptOptions, SessionSnapshot};
 use super::provider::{summarize, ProviderRequest};
 
 /// Upper bound on the size of a prompt, in bytes.
@@ -42,7 +42,13 @@ pub fn refresh_blurb<F>(
 where
     F: FnOnce(&ProviderRequest) -> Result<String, String>,
 {
-    let prompt = build_prompt(snapshot, &prompt_options(config));
+    // The on-device provider is given its instructions separately (see the `fm` module), so it
+    // only gets the session details; the others get the generic instructions in the prompt.
+    let options = prompt_options(config);
+    let prompt = match config.provider {
+        Some(AiProvider::Apple) => build_details_prompt(snapshot, &options),
+        _ => build_prompt(snapshot, &options),
+    };
     let mut hasher = DefaultHasher::new();
     prompt.hash(&mut hasher);
     let fingerprint = hasher.finish();
@@ -57,7 +63,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::prompt::{PaneSnapshot, TabSnapshot};
+    use super::super::prompt::{PaneSnapshot, TabSnapshot, INSTRUCTIONS};
     use super::*;
     use std::cell::Cell;
     use zellij_utils::input::ai_summary::AiProvider;
@@ -173,6 +179,37 @@ mod tests {
             Err("connection refused".to_owned())
         });
         assert_eq!(outcome, RefreshOutcome::Failed);
+    }
+
+    /// The request body each provider receives for the same snapshot.
+    fn body_sent_for(provider: AiProvider) -> String {
+        let config = AiSummaryConfig {
+            provider: Some(provider),
+            ..Default::default()
+        };
+        let sent = std::cell::RefCell::new(String::new());
+        refresh_blurb(&config, "key", &snapshot("shell", "ls"), None, |request| {
+            *sent.borrow_mut() = request.body.clone();
+            Err("stop here".to_owned())
+        });
+        sent.into_inner()
+    }
+
+    #[test]
+    fn network_providers_get_the_instructions_inside_the_prompt() {
+        for provider in [AiProvider::Claude, AiProvider::DeepSeek] {
+            assert!(body_sent_for(provider).contains(INSTRUCTIONS));
+        }
+    }
+
+    #[test]
+    fn the_on_device_provider_gets_only_the_session_details() {
+        // its instructions go to `fm` separately (see the `fm` module), tuned for the small
+        // model: repeating the generic ones in the prompt would pull the reply back to them
+        let body = body_sent_for(AiProvider::Apple);
+        assert!(!body.contains(INSTRUCTIONS));
+        assert!(body.contains("Session: demo"));
+        assert!(body.contains("shell"));
     }
 
     #[test]

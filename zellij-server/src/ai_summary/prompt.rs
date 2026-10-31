@@ -33,9 +33,23 @@ pub struct PromptOptions {
     pub max_bytes: usize,
 }
 
-/// Builds the full prompt for a session. Everything that came from the session is redacted,
-/// and the whole prompt is at most `options.max_bytes` long.
+/// Builds the full prompt for a session: the instructions, then the session details.
+/// Everything that came from the session is redacted, and the whole prompt is at most
+/// `options.max_bytes` long.
 pub fn build_prompt(snapshot: &SessionSnapshot, options: &PromptOptions) -> String {
+    let data = session_details(snapshot, options);
+    let budget = options.max_bytes.saturating_sub(INSTRUCTIONS.len() + 2);
+    format!("{}\n\n{}", INSTRUCTIONS, truncate_bytes(&data, budget))
+}
+
+/// Just the session details, for providers that are given their instructions separately.
+/// Redacted like `build_prompt`, and at most `options.max_bytes` long.
+pub fn build_details_prompt(snapshot: &SessionSnapshot, options: &PromptOptions) -> String {
+    truncate_bytes(&session_details(snapshot, options), options.max_bytes)
+}
+
+/// The redacted description of the session's tabs and panes, not yet capped in length.
+fn session_details(snapshot: &SessionSnapshot, options: &PromptOptions) -> String {
     let mut data = format!("Session: {}\n", redact(&snapshot.session_name));
     for tab in &snapshot.tabs {
         data.push_str(&format!("Tab: {}\n", redact(&tab.name)));
@@ -58,8 +72,7 @@ pub fn build_prompt(snapshot: &SessionSnapshot, options: &PromptOptions) -> Stri
             }
         }
     }
-    let budget = options.max_bytes.saturating_sub(INSTRUCTIONS.len() + 2);
-    format!("{}\n\n{}", INSTRUCTIONS, truncate_bytes(&data, budget))
+    data
 }
 
 #[cfg(test)]
@@ -107,6 +120,39 @@ mod tests {
                 prompt
             );
         }
+    }
+
+    #[test]
+    fn the_details_prompt_has_the_session_data_but_no_instructions() {
+        // for providers that take their instructions separately
+        let details = build_details_prompt(&snapshot_with_screen("ok"), &options());
+        assert!(!details.contains(INSTRUCTIONS));
+        for expected in [
+            "rusty-owl",
+            "build",
+            "cargo watch -x test",
+            "/home/me/zellij",
+        ] {
+            assert!(details.contains(expected), "missing {:?}", expected);
+        }
+        // the full prompt is the instructions followed by exactly these details
+        let full = build_prompt(&snapshot_with_screen("ok"), &options());
+        assert_eq!(full, format!("{}\n\n{}", INSTRUCTIONS, details));
+    }
+
+    #[test]
+    fn the_details_prompt_is_redacted_and_capped() {
+        let mut opts = options();
+        let details = build_details_prompt(
+            &snapshot_with_screen("export MY_API_KEY=hunter2hunter2"),
+            &opts,
+        );
+        assert!(details.contains("MY_API_KEY=[REDACTED]"));
+        assert!(!details.contains("hunter2"));
+        // the whole byte budget is for the details: there are no instructions to leave room for
+        opts.max_bytes = 40;
+        let capped = build_details_prompt(&snapshot_with_screen("a long screen"), &opts);
+        assert_eq!(capped.len(), 40);
     }
 
     #[test]

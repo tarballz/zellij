@@ -5,6 +5,8 @@ use super::config::ConfigError;
 
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-haiku-5-5";
 pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
+/// `fm`'s name for the on-device Apple Foundation Model.
+pub const DEFAULT_APPLE_MODEL: &str = "system";
 pub const DEFAULT_CLAUDE_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 pub const DEFAULT_DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const DEFAULT_INTERVAL_SECS: u64 = 300;
@@ -14,6 +16,9 @@ pub const DEFAULT_SCREEN_LINES: usize = 20;
 pub enum AiProvider {
     Claude,
     DeepSeek,
+    /// The on-device Apple Foundation Model, run through the macOS `fm` command. Nothing leaves
+    /// the machine, so no API key is involved.
+    Apple,
 }
 
 impl AiProvider {
@@ -21,6 +26,7 @@ impl AiProvider {
         match self {
             AiProvider::Claude => "claude",
             AiProvider::DeepSeek => "deepseek",
+            AiProvider::Apple => "apple",
         }
     }
 }
@@ -82,15 +88,34 @@ impl AiSummaryConfig {
         Some(self.model.clone().unwrap_or_else(|| match provider {
             AiProvider::Claude => DEFAULT_CLAUDE_MODEL.to_owned(),
             AiProvider::DeepSeek => DEFAULT_DEEPSEEK_MODEL.to_owned(),
+            AiProvider::Apple => DEFAULT_APPLE_MODEL.to_owned(),
         }))
     }
 
+    /// Whether the provider is reached over the network with a key. False when disabled.
+    pub fn needs_api_key(&self) -> bool {
+        matches!(
+            self.provider,
+            Some(AiProvider::Claude) | Some(AiProvider::DeepSeek)
+        )
+    }
+
+    /// The variable the API key is read from. `None` when disabled, or when the provider has
+    /// no key (the on-device one).
     pub fn effective_api_key_env(&self) -> Option<String> {
-        let provider = self.provider?;
-        Some(self.api_key_env.clone().unwrap_or_else(|| match provider {
-            AiProvider::Claude => DEFAULT_CLAUDE_API_KEY_ENV.to_owned(),
-            AiProvider::DeepSeek => DEFAULT_DEEPSEEK_API_KEY_ENV.to_owned(),
-        }))
+        match self.provider? {
+            AiProvider::Claude => Some(
+                self.api_key_env
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_CLAUDE_API_KEY_ENV.to_owned()),
+            ),
+            AiProvider::DeepSeek => Some(
+                self.api_key_env
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_DEEPSEEK_API_KEY_ENV.to_owned()),
+            ),
+            AiProvider::Apple => None,
+        }
     }
 
     pub fn effective_interval_secs(&self) -> u64 {
@@ -116,9 +141,10 @@ impl AiSummaryConfig {
                     config.provider = Some(match string_arg(node)?.as_str() {
                         "claude" => AiProvider::Claude,
                         "deepseek" => AiProvider::DeepSeek,
+                        "apple" => AiProvider::Apple,
                         _ => {
                             return Err(kdl_error(
-                                "provider must be \"claude\" or \"deepseek\"".to_owned(),
+                                "provider must be \"claude\", \"deepseek\" or \"apple\"".to_owned(),
                                 node,
                             ))
                         },
@@ -256,6 +282,38 @@ mod tests {
             deepseek.effective_api_key_env().as_deref(),
             Some(DEFAULT_DEEPSEEK_API_KEY_ENV)
         );
+    }
+
+    #[test]
+    fn apple_runs_on_device_with_no_api_key() {
+        let apple = parse("ai_summary {\n provider \"apple\"\n}").unwrap();
+        assert_eq!(apple.provider, Some(AiProvider::Apple));
+        assert!(apple.is_enabled());
+        // `fm`'s name for the on-device model
+        assert_eq!(
+            apple.effective_model().as_deref(),
+            Some(DEFAULT_APPLE_MODEL)
+        );
+        assert_eq!(DEFAULT_APPLE_MODEL, "system");
+        // nothing leaves the machine, so there is no key to look up
+        assert_eq!(apple.effective_api_key_env(), None);
+        assert!(!apple.needs_api_key());
+    }
+
+    #[test]
+    fn network_providers_need_an_api_key() {
+        for provider in ["claude", "deepseek"] {
+            let config = parse(&format!("ai_summary {{\n provider \"{}\"\n}}", provider)).unwrap();
+            assert!(config.needs_api_key(), "{} needs a key", provider);
+        }
+        assert!(!parse("ai_summary {\n}").unwrap().needs_api_key());
+    }
+
+    #[test]
+    fn apple_round_trips_through_kdl() {
+        let config = parse("ai_summary {\n provider \"apple\"\n}").unwrap();
+        let reparsed = AiSummaryConfig::from_kdl(&config.to_kdl().unwrap()).unwrap();
+        assert_eq!(config, reparsed);
     }
 
     #[test]

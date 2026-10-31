@@ -68,12 +68,25 @@ pub fn build_request(
             ],
             body,
         },
+        // The on-device provider isn't an HTTP call: the bare prompt is piped to `fm` (see the
+        // `fm` module), so there is no URL, key or JSON envelope. The model is chosen by the
+        // caller that runs `fm`.
+        AiProvider::Apple => ProviderRequest {
+            url: String::new(),
+            headers: Vec::new(),
+            body: prompt.to_owned(),
+        },
     }
 }
 
 /// Extracts the generated text from a provider response body, `None` if the response is an
 /// error or isn't shaped as expected.
 pub fn parse_response(provider: AiProvider, body: &str) -> Option<String> {
+    if provider == AiProvider::Apple {
+        // `fm` prints the reply as plain text, so there is no JSON to unwrap. An empty reply
+        // (the model declined, say) is not a blurb.
+        return Some(body.to_owned()).filter(|text| !text.trim().is_empty());
+    }
     let value: Value = serde_json::from_str(body).ok()?;
     let text = match provider {
         AiProvider::Claude => value["content"]
@@ -82,6 +95,8 @@ pub fn parse_response(provider: AiProvider, body: &str) -> Option<String> {
             .find(|block| block["type"] == "text")?["text"]
             .as_str()?,
         AiProvider::DeepSeek => value["choices"][0]["message"]["content"].as_str()?,
+        // handled above, before the JSON parse
+        AiProvider::Apple => return None,
     };
     Some(text.to_owned())
 }
@@ -115,7 +130,35 @@ pub fn clean_blurb(raw: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    Some(line.chars().take(MAX_BLURB_CHARS).collect())
+    Some(shorten(line))
+}
+
+/// `line` unchanged if it fits in `MAX_BLURB_CHARS`; otherwise its start, cut where a word ends
+/// and followed by an ellipsis, so the result still fits. Cutting mid-word would leave
+/// something like "...encountering an undefi". Only a line with no word break in its second
+/// half (a long path, say) is cut at the exact limit.
+fn shorten(line: &str) -> String {
+    if line.chars().count() <= MAX_BLURB_CHARS {
+        return line.to_owned();
+    }
+    // one character is kept free for the ellipsis
+    let kept: String = line.chars().take(MAX_BLURB_CHARS - 1).collect();
+    let cut_at_word_end = line.chars().nth(MAX_BLURB_CHARS - 1) == Some(' ');
+    let kept = if cut_at_word_end {
+        kept.as_str()
+    } else {
+        match kept.rfind(' ') {
+            // `rfind` gives a byte offset of an ASCII space, always a valid place to cut
+            Some(last_space) if kept[..last_space].chars().count() >= MAX_BLURB_CHARS / 2 => {
+                &kept[..last_space]
+            },
+            _ => kept.as_str(),
+        }
+    };
+    format!(
+        "{}…",
+        kept.trim_end_matches(|c: char| c == ' ' || c == ',' || c == ';' || c == ':' || c == '-')
+    )
 }
 
 #[cfg(test)]
@@ -191,6 +234,37 @@ mod tests {
     }
 
     #[test]
+    fn apple_requests_carry_only_the_prompt() {
+        // the on-device transport pipes the body to `fm`: there is no URL, key or header
+        let request = build_request(AiProvider::Apple, "system", "", "describe this");
+        assert_eq!(request.url, "");
+        assert!(request.headers.is_empty());
+        assert_eq!(request.body, "describe this");
+    }
+
+    #[test]
+    fn apple_responses_are_plain_text() {
+        assert_eq!(
+            parse_response(AiProvider::Apple, "Fixing tests\n").as_deref(),
+            Some("Fixing tests\n")
+        );
+        // an empty reply (say, the model declined) is not a blurb
+        assert_eq!(parse_response(AiProvider::Apple, ""), None);
+        assert_eq!(parse_response(AiProvider::Apple, "  \n"), None);
+    }
+
+    #[test]
+    fn summarize_with_apple_cleans_the_plain_text_reply() {
+        let sent = std::cell::RefCell::new(None);
+        let blurb = summarize(&config_for(AiProvider::Apple), "", "my prompt", |request| {
+            *sent.borrow_mut() = Some(request.clone());
+            Ok("\"Building zellij.\"\n".to_owned())
+        });
+        assert_eq!(blurb.as_deref(), Some("Building zellij"));
+        assert_eq!(sent.into_inner().unwrap().body, "my prompt");
+    }
+
+    #[test]
     fn debug_output_never_contains_the_api_key() {
         for provider in [AiProvider::Claude, AiProvider::DeepSeek] {
             let request = build_request(provider, "m", "SUPER-SECRET-KEY", "p");
@@ -253,6 +327,39 @@ mod tests {
         assert_eq!(
             clean_blurb("\n\nSecond line wins"),
             Some("Second line wins".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_long_blurb_is_cut_at_a_whole_word_and_marked_with_an_ellipsis() {
+        let long = "Running LaTeX compilation on the physics-thesis project, encountering an \
+                    undefined control sequence error";
+        let cleaned = clean_blurb(long).unwrap();
+        assert!(cleaned.chars().count() <= MAX_BLURB_CHARS);
+        let kept = cleaned
+            .strip_suffix('…')
+            .expect("should end with an ellipsis");
+        // what is kept is the start of the original, ending where a word ends
+        assert!(long.starts_with(kept), "{:?} is not a prefix", kept);
+        assert!(
+            long[kept.len()..].starts_with(' '),
+            "cut inside a word: {:?}",
+            kept
+        );
+        assert!(
+            !kept.ends_with(|c: char| c == ' ' || c == ','),
+            "{:?}",
+            kept
+        );
+    }
+
+    #[test]
+    fn a_blurb_within_the_cap_is_left_alone() {
+        let exactly_fitting = "a".repeat(MAX_BLURB_CHARS);
+        assert_eq!(clean_blurb(&exactly_fitting), Some(exactly_fitting.clone()));
+        assert_eq!(
+            clean_blurb("Fixing the build").as_deref(),
+            Some("Fixing the build")
         );
     }
 

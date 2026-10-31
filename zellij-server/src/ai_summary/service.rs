@@ -12,6 +12,7 @@ use zellij_utils::data::{ClientId, PaneScrollbackResponse};
 use zellij_utils::input::ai_summary::{AiProvider, AiSummaryConfig};
 use zellij_utils::session_blurb::write_blurb;
 
+use super::fm::run_fm;
 use super::http::send_request;
 use super::provider::{parse_response, ProviderRequest};
 use super::redact::{redact, truncate_bytes};
@@ -29,6 +30,29 @@ const MIN_INTERVAL_SECS: u64 = 30;
 /// Pane contents are requested on behalf of this client; it only matters for selection state.
 const READ_AS_CLIENT: ClientId = 1;
 
+/// The API key to use, or `None` when blurbs can't run: disabled, or the key's variable is
+/// unset or blank. `lookup` reads an environment variable by name (a parameter so tests don't
+/// have to touch the real environment). The on-device provider has no key, so it gets an empty
+/// one and never consults `lookup`.
+fn resolve_api_key(
+    config: &AiSummaryConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if !config.is_enabled() {
+        return None;
+    }
+    if !config.needs_api_key() {
+        return Some(String::new());
+    }
+    let api_key_env = config.effective_api_key_env()?;
+    let key = lookup(&api_key_env)?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.to_owned())
+}
+
 /// Starts the thread, unless blurbs are disabled or the API key variable isn't set (the key is
 /// read once, here, and never logged).
 pub fn spawn_ai_summary_service(
@@ -39,16 +63,12 @@ pub fn spawn_ai_summary_service(
     if !config.is_enabled() {
         return None;
     }
-    let api_key_env = config.effective_api_key_env()?;
-    let api_key = match std::env::var(&api_key_env) {
-        Ok(key) if !key.trim().is_empty() => key.trim().to_owned(),
-        _ => {
-            log::info!(
-                "ai_summary: ${} is not set, session blurbs are disabled",
-                api_key_env
-            );
-            return None;
-        },
+    let Some(api_key) = resolve_api_key(&config, |name| std::env::var(name).ok()) else {
+        log::info!(
+            "ai_summary: ${} is not set, session blurbs are disabled",
+            config.effective_api_key_env().unwrap_or_default()
+        );
+        return None;
     };
     log::info!(
         "ai_summary: enabled ({:?}, model {}, every {}s, screen text {})",
@@ -67,10 +87,19 @@ pub fn spawn_ai_summary_service(
         .ok()
 }
 
-/// `send_request`, with failures logged: `summarize` deliberately swallows them. A response
-/// that can't be used is logged as a short, redacted snippet to make it diagnosable.
-fn send_and_log(provider: AiProvider, request: &ProviderRequest) -> Result<String, String> {
-    let result = send_request(request);
+/// Sends `request` over the provider's transport, with failures logged: `summarize`
+/// deliberately swallows them. The on-device provider runs `fm` with the request body as its
+/// prompt; every other provider makes an HTTP call. A response that can't be used is logged as
+/// a short, redacted snippet to make it diagnosable.
+fn send_and_log(
+    provider: AiProvider,
+    model: &str,
+    request: &ProviderRequest,
+) -> Result<String, String> {
+    let result = match provider {
+        AiProvider::Apple => run_fm(model, &request.body),
+        AiProvider::Claude | AiProvider::DeepSeek => send_request(request),
+    };
     match &result {
         Err(e) => log::warn!("ai_summary: request failed: {}", e),
         Ok(body) if parse_response(provider, body).is_none() => log::warn!(
@@ -131,7 +160,10 @@ fn refresh_once(
     let Some(provider) = config.provider else {
         return;
     };
-    let send = |request: &ProviderRequest| send_and_log(provider, request);
+    let Some(model) = config.effective_model() else {
+        return;
+    };
+    let send = |request: &ProviderRequest| send_and_log(provider, &model, request);
     match refresh_blurb(config, api_key, &snapshot, *last_fingerprint, send) {
         RefreshOutcome::Updated { blurb, fingerprint } => {
             match write_blurb(&session_info_folder_for_session(session_id), &blurb) {
@@ -171,4 +203,57 @@ fn read_screens(
         }
     }
     screens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zellij_utils::input::ai_summary::AiProvider;
+
+    fn config_for(provider: AiProvider) -> AiSummaryConfig {
+        AiSummaryConfig {
+            provider: Some(provider),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_on_device_provider_starts_without_any_key() {
+        // no environment variable is consulted at all
+        let key = resolve_api_key(&config_for(AiProvider::Apple), |_| None);
+        assert_eq!(key.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_network_provider_uses_the_key_from_its_variable() {
+        let key = resolve_api_key(&config_for(AiProvider::Claude), |name| {
+            assert_eq!(name, "ANTHROPIC_API_KEY");
+            Some("  sk-test  ".to_owned())
+        });
+        assert_eq!(key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn a_configured_variable_name_wins_over_the_default() {
+        let mut config = config_for(AiProvider::DeepSeek);
+        config.api_key_env = Some("MY_KEY".to_owned());
+        let key = resolve_api_key(&config, |name| {
+            assert_eq!(name, "MY_KEY");
+            Some("k".to_owned())
+        });
+        assert_eq!(key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn a_network_provider_stays_off_without_a_usable_key() {
+        let claude = config_for(AiProvider::Claude);
+        assert_eq!(resolve_api_key(&claude, |_| None), None);
+        assert_eq!(resolve_api_key(&claude, |_| Some("  \n".to_owned())), None);
+    }
+
+    #[test]
+    fn a_disabled_config_has_no_key() {
+        let key = resolve_api_key(&AiSummaryConfig::default(), |_| Some("k".to_owned()));
+        assert_eq!(key, None);
+    }
 }
